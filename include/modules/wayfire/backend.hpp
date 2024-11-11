@@ -1,6 +1,7 @@
 #pragma once
 
 #include <json/json.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <functional>
@@ -14,6 +15,23 @@
 namespace waybar::modules::wayfire {
 
 using EventHandler = std::function<void(const std::string& event)>;
+
+struct Sock {
+  int fd;
+
+  Sock(int fd) : fd{fd} {}
+  ~Sock() { close(fd); }
+
+  Sock(const Sock&) = delete;
+  auto operator=(const Sock&) = delete;
+
+  Sock(Sock&& rhs) noexcept : fd{rhs.fd} { rhs.fd = -1; }
+  auto& operator=(Sock&& rhs) noexcept {
+    fd = rhs.fd;
+    rhs.fd = -1;
+    return *this;
+  }
+};
 
 struct State {
   /*
@@ -47,7 +65,7 @@ struct State {
   };
 
   struct Wset {
-    Output* output;
+    std::reference_wrapper<Output> output;
     std::vector<Workspace> wss;
     size_t ws_w, ws_h, ws_idx;
 
@@ -71,23 +89,23 @@ class IPC {
   static std::weak_ptr<IPC> instance;
   Json::CharReaderBuilder reader_builder;
   Json::StreamWriterBuilder writer_builder;
-  std::list<std::pair<std::string, EventHandler*>> handlers;
+  std::list<std::pair<std::string, std::reference_wrapper<const EventHandler>>> handlers;
   std::mutex handlers_mutex;
   State state;
   std::mutex state_mutex;
 
   IPC() { start(); }
 
-  static auto connect() -> int;
-  auto receive(int fd) -> Json::Value;
+  static auto connect() -> Sock;
+  auto receive(Sock& sock) -> Json::Value;
   auto start() -> void;
   auto root_event_handler(const std::string& event, const Json::Value& data) -> void;
   auto update_state_handler(const std::string& event, const Json::Value& data) -> void;
 
  public:
   static auto get_instance() -> std::shared_ptr<IPC>;
-  auto send(const std::string& method, const Json::Value& data) -> Json::Value;
-  auto register_handler(const std::string& event, EventHandler& handler) -> void;
+  auto send(const std::string& method, Json::Value&& data) -> Json::Value;
+  auto register_handler(const std::string& event, const EventHandler& handler) -> void;
   auto unregister_handler(EventHandler& handler) -> void;
 
   auto lock_state() -> std::lock_guard<std::mutex> { return std::lock_guard{state_mutex}; }

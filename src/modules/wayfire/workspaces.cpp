@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <string>
+#include <utility>
 
 #include "modules/wayfire/backend.hpp"
 
@@ -12,10 +13,7 @@ Workspaces::Workspaces(const std::string& id, const Bar& bar, const Json::Value&
     : AModule{config, "workspaces", id, false, false},
       bar{bar},
       ipc{IPC::get_instance()},
-      handler{[this](const auto& e) {
-        spdlog::warn("emit {}", e);
-        dp.emit();
-      }} {
+      handler{[this](const auto&) { dp.emit(); }} {
   box.set_name("workspaces");
   if (!id.empty()) box.get_style_context()->add_class(id);
   box.get_style_context()->add_class(MODULE_CLASS);
@@ -45,9 +43,7 @@ auto Workspaces::update() -> void {
     auto _ = ipc->lock_state();
 
     const auto& output_name = bar.output->name;
-    spdlog::debug("outputs_n: {}", ipc->get_outputs().size());
     const auto& output = ipc->get_outputs().at(output_name);
-    spdlog::debug("wsets_n: {}", ipc->get_wsets().size());
     const auto& wset = ipc->get_wsets().at(output.wset_idx);
 
     auto output_focused = ipc->get_focused_output_name() == output_name;
@@ -66,7 +62,7 @@ auto Workspaces::update() -> void {
           data["x"] = i % ws_w;
           data["y"] = i / ws_h;
           data["output-id"] = output.id;
-          ipc->send("vswitch/set-workspace", data);
+          ipc->send("vswitch/set-workspace", std::move(data));
         });
       }
     }
@@ -75,7 +71,8 @@ auto Workspaces::update() -> void {
     buttons.resize(num_wss);
 
     // update buttons
-    for (auto i = 0; i < num_wss; i++) {
+    for (size_t i = 0; i < num_wss; i++) {
+      const auto& ws = wset.wss[i];
       auto& btn = buttons[i];
       auto ctx = btn.get_style_context();
 
@@ -87,18 +84,20 @@ auto Workspaces::update() -> void {
         ctx->add_class("current_output");
       else
         ctx->remove_class("current_output");
-      if (wset.wss[i].num_views == 0)
+      if (ws.num_views == 0)
         ctx->add_class("empty");
       else
         ctx->remove_class("empty");
 
       // todo: format
-      btn.set_label(std::to_string(i));
-      btn.show();
+      btn.set_label(std::to_string(i + 1));
+
+      if (config_["current-only"].asBool() and i != wset.ws_idx)
+        btn.hide();
+      else
+        btn.show();
     }
   }
-
-  spdlog::info("wayfire workspace updated");
 
   AModule::update();
 }
