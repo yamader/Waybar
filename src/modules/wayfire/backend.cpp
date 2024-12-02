@@ -24,7 +24,7 @@ inline auto byteswap(uint32_t x) -> uint32_t {
          (x & 0x000000ff) << 24;
 }
 
-auto pack_and_write(Sock& sock, std::string_view msg) -> void {
+auto pack_and_write(Sock& sock, const std::string& msg) -> void {
   uint32_t len = msg.size();
   if constexpr (std::endian::native != std::endian::little) len = byteswap(len);
   (void)write(sock.fd, &len, 4);
@@ -43,35 +43,22 @@ inline auto is_mapped_toplevel_view(const Json::Value& view) -> bool {
          view["pid"].asInt() != -1;
 }
 
-auto State::Wset::count_ws(const Json::Value& pos) -> Workspace& {
-  auto x = pos["x"].asInt();
-  auto y = pos["y"].asInt();
-  return wss.at(ws_w * y + x);
-}
-
-auto State::Wset::locate_ws(const Json::Value& geo) -> Workspace& {
-  auto x = geo["x"].asInt() / output.get().w;
-  auto y = geo["y"].asInt() / output.get().h;
-  return wss.at(ws_w * y + x);
-}
-
 // output updates are not notified by event, so manual updates are required
 auto State::update_output(const Json::Value& output_data) -> void {
-  auto& output = outputs.at(output_data["name"].asString());
-  output.id = output_data["id"].asUInt();
-  output.w = output_data["geometry"]["width"].asUInt();
-  output.h = output_data["geometry"]["height"].asUInt();
-  output.wset_idx = output_data["wset-index"].asUInt();
+  /*outputs.at(output_data["name"].asString()) = output_data;*/
 }
 
 // wset updates are not notified by event, so manual updates are required
 auto State::update_wset(const Json::Value& wset_data) -> void {
-  // todo: new wset
-  auto& wset = wsets.at(wset_data["index"].asUInt());
-  auto ws_w = wset_data["workspace"]["grid_width"].asUInt();
-  auto ws_h = wset_data["workspace"]["grid_height"].asUInt();
-  // when ws size changed, then update wsets/views info
-  views_expired = wsets_expired = wsets_expired or (wset.ws_w != ws_w) or (wset.ws_h != ws_h);
+  /*// todo: new wset*/
+  /*// when ws size changed, then update wsets/views info*/
+  /*if (not wsets_expired) {*/
+  /*  const auto& new_ws = wset_data["workspace"];*/
+  /*  auto& old_ws = wsets.at(wset_data["index"].asUInt())["workspace"];*/
+  /*  views_expired = wsets_expired =*/
+  /*      new_ws["grid_width"].asUInt() != old_ws["grid_width"].asUInt() or*/
+  /*      new_ws["grid_height"].asUInt() != old_ws["grid_height"].asUInt();*/
+  /*}*/
 }
 
 auto IPC::get_instance() -> std::shared_ptr<IPC> {
@@ -106,12 +93,12 @@ auto IPC::connect() -> Sock {
 auto IPC::receive(Sock& sock) -> Json::Value {
   auto len = *reinterpret_cast<uint32_t*>(read_exact(sock, 4).data());
   if constexpr (std::endian::native != std::endian::little) len = byteswap(len);
-  auto msg = read_exact(sock, len);
+  auto buf = read_exact(sock, len);
 
   Json::Value json;
   std::string err;
   auto* reader = reader_builder.newCharReader();
-  if (!reader->parse(&*msg.begin(), &*msg.end(), &json, &err)) {
+  if (!reader->parse(&*buf.begin(), &*buf.end(), &json, &err)) {
     throw std::runtime_error{"Wayfire IPC: parse json failed: " + err};
   }
   return json;
@@ -121,11 +108,11 @@ auto IPC::send(const std::string& method, Json::Value&& data) -> Json::Value {
   spdlog::debug("Wayfire IPC: send method \"{}\"", method);
   auto sock = connect();
 
-  Json::Value msg;
-  msg["method"] = method;
-  msg["data"] = std::move(data);
+  Json::Value json;
+  json["method"] = method;
+  json["data"] = std::move(data);
 
-  pack_and_write(sock, Json::writeString(writer_builder, msg));
+  pack_and_write(sock, Json::writeString(writer_builder, json));
   auto res = receive(sock);
   root_event_handler(method, res);
   return res;
@@ -144,9 +131,10 @@ auto IPC::start() -> void {
     auto sock = connect();
 
     {
-      Json::Value msg;
-      msg["method"] = "window-rules/events/watch";
-      pack_and_write(sock, Json::writeString(writer_builder, msg));
+      Json::Value json;
+      json["method"] = "window-rules/events/watch";
+
+      pack_and_write(sock, Json::writeString(writer_builder, json));
       if (receive(sock)["result"] != "ok") {
         spdlog::error(
             "Wayfire IPC: method \"window-rules/events/watch\""
@@ -178,14 +166,14 @@ auto IPC::root_event_handler(const std::string& event, const Json::Value& data) 
     auto _ = lock_state();
     update_state_handler(event, data);
   }
-  if (state.wsets_expired) {
-    state.wsets_expired = false;
-    send("window-rules/list-wsets", {});
-  }
-  if (state.views_expired) {
-    state.views_expired = false;
-    send("window-rules/list-views", {});
-  }
+  /*if (state.wsets_expired) {*/
+  /*  state.wsets_expired = false;*/
+  /*  send("window-rules/list-wsets", {});*/
+  /*}*/
+  /*if (state.views_expired) {*/
+  /*  state.views_expired = false;*/
+  /*  send("window-rules/list-views", {});*/
+  /*}*/
   if (not(state.wsets_expired or state.views_expired)) {
     auto _ = std::lock_guard{handlers_mutex};
     for (const auto& [_event, handler] : handlers)
