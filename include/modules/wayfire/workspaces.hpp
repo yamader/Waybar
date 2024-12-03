@@ -13,14 +13,15 @@
 namespace waybar::modules::wayfire {
 
 class Workspaces : public AModule {
-  const Bar& bar;
   std::shared_ptr<IPC> ipc;
   EventHandler handler;
 
-  Gtk::Box box;
-  std::vector<Gtk::Button> buttons;
+  const Bar& bar_;
+  Gtk::Box box_;
+  std::vector<Gtk::Button> buttons_;
 
   auto update() -> void override;
+  auto update_box() -> void;
 
  public:
   Workspaces(const std::string& id, const Bar& bar, const Json::Value& config);

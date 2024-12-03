@@ -337,9 +337,9 @@ if true
     add_project_arguments('-DHAVE_WAYFIRE', language: 'cpp')
     src_files += files(
         'src/modules/wayfire/backend.cpp',
+        'src/modules/wayfire/window.cpp',
         'src/modules/wayfire/workspaces.cpp',
     )
-    # man_files += files('man/waybar-wayfire-tags.5.scd')
 endif
 
 if libnl.found() and libnlgen.found()

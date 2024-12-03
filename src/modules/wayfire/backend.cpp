@@ -4,13 +4,11 @@
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstdlib>
-#include <exception>
 #include <ranges>
 #include <stdexcept>
 #include <thread>
@@ -25,41 +23,51 @@ inline auto byteswap(uint32_t x) -> uint32_t {
          (x & 0x000000ff) << 24;
 }
 
-auto pack_and_write(int fd, std::string_view msg) -> void {
-  uint32_t len = msg.size();
+auto pack_and_write(Sock& sock, std::string&& buf) -> void {
+  uint32_t len = buf.size();
   if constexpr (std::endian::native != std::endian::little) len = byteswap(len);
-  (void)write(fd, &len, 4);
-  (void)write(fd, msg.data(), msg.size());
+  (void)write(sock.fd, &len, 4);
+  (void)write(sock.fd, buf.data(), buf.size());
 }
 
-auto read_exact(int fd, size_t n) -> std::string {
+auto read_exact(Sock& sock, size_t n) -> std::string {
   auto buf = std::string(n, 0);
-  for (auto i = 0; i < n;) i += read(fd, &buf[i], n - i);
+  for (size_t i = 0; i < n;) i += read(sock.fd, &buf[i], n - i);
   return buf;
 }
 
 // https://github.com/WayfireWM/pywayfire/blob/69b7c21/wayfire/ipc.py#L438
 inline auto is_mapped_toplevel_view(const Json::Value& view) -> bool {
   return view["mapped"].asBool() and view["role"] != "desktop-environment" and
-         view["pid"].asInt() != 1;
+         view["pid"].asInt() != -1;
 }
 
+// want to use Dlang's `inout` in C++
 auto State::Wset::count_ws(const Json::Value& pos) -> Workspace& {
-  auto x = pos["x"].asUInt();
-  auto y = pos["y"].asUInt();
+  auto x = pos["x"].asInt();
+  auto y = pos["y"].asInt();
+  return wss.at(ws_w * y + x);
+}
+auto State::Wset::count_ws(const Json::Value& pos) const -> const Workspace& {
+  auto x = pos["x"].asInt();
+  auto y = pos["y"].asInt();
   return wss.at(ws_w * y + x);
 }
 
 auto State::Wset::locate_ws(const Json::Value& geo) -> Workspace& {
-  auto x = geo["x"].asUInt() / output->w;
-  auto y = geo["y"].asUInt() / output->h;
+  auto x = geo["x"].asInt() / output.get().w;
+  auto y = geo["y"].asInt() / output.get().h;
+  return wss.at(ws_w * y + x);
+}
+auto State::Wset::locate_ws(const Json::Value& geo) const -> const Workspace& {
+  auto x = geo["x"].asInt() / output.get().w;
+  auto y = geo["y"].asInt() / output.get().h;
   return wss.at(ws_w * y + x);
 }
 
 // output updates are not notified by event, so manual updates are required
 auto State::update_output(const Json::Value& output_data) -> void {
-  auto& output = outputs[output_data["name"].asString()];
-
+  auto& output = outputs.at(output_data["name"].asString());
   output.id = output_data["id"].asUInt();
   output.w = output_data["geometry"]["width"].asUInt();
   output.h = output_data["geometry"]["height"].asUInt();
@@ -68,14 +76,17 @@ auto State::update_output(const Json::Value& output_data) -> void {
 
 // wset updates are not notified by event, so manual updates are required
 auto State::update_wset(const Json::Value& wset_data) -> void {
-  // todo: handle new wset
-  auto wset_idx = wset_data["index"].asUInt();
-  auto& wset = wsets[wset_idx];
-  auto ws_w = wset_data["workspace"]["grid_width"].asUInt();
-  auto ws_h = wset_data["workspace"]["grid_height"].asUInt();
+  // todo: new wset
+  auto& wset = wsets.at(wset_data["index"].asUInt());
 
-  // when ws size changed, then update wsets/views info
-  views_expired = wsets_expired = wsets_expired or (wset.ws_w != ws_w) or (wset.ws_h != ws_h);
+  // detect ws resize
+  // todo: needed?
+  if (!wsets_expired) {
+    auto ws_w = wset_data["workspace"]["grid_width"].asUInt();
+    auto ws_h = wset_data["workspace"]["grid_height"].asUInt();
+
+    views_expired = wsets_expired = (wset.ws_w != ws_w) or (wset.ws_h != ws_h);
+  }
 }
 
 auto IPC::get_instance() -> std::shared_ptr<IPC> {
@@ -84,7 +95,7 @@ auto IPC::get_instance() -> std::shared_ptr<IPC> {
   return p;
 }
 
-auto IPC::connect() -> int {
+auto IPC::connect() -> Sock {
   auto* path = std::getenv("WAYFIRE_SOCKET");
   if (path == nullptr) {
     throw std::runtime_error{"Wayfire IPC: ipc not available"};
@@ -104,78 +115,78 @@ auto IPC::connect() -> int {
     throw std::runtime_error{"Wayfire IPC: connect() failed"};
   }
 
-  return sock;
+  return {sock};
 }
 
-auto IPC::receive(int fd) -> Json::Value {
-  auto len = *reinterpret_cast<uint32_t*>(read_exact(fd, 4).data());
+auto IPC::receive(Sock& sock) -> Json::Value {
+  auto len = *reinterpret_cast<uint32_t*>(read_exact(sock, 4).data());
   if constexpr (std::endian::native != std::endian::little) len = byteswap(len);
-  auto msg = read_exact(fd, len);
+  auto buf = read_exact(sock, len);
 
   Json::Value json;
   std::string err;
   auto* reader = reader_builder.newCharReader();
-  if (!reader->parse(&*msg.begin(), &*msg.end(), &json, &err)) {
+  if (!reader->parse(&*buf.begin(), &*buf.end(), &json, &err)) {
     throw std::runtime_error{"Wayfire IPC: parse json failed: " + err};
   }
   return json;
 }
 
-auto IPC::send(const std::string& method, const Json::Value& data) -> Json::Value {
+auto IPC::send(const std::string& method, Json::Value&& data) -> Json::Value {
   spdlog::debug("Wayfire IPC: send method \"{}\"", method);
   auto sock = connect();
 
-  Json::Value msg;
-  msg["method"] = method;
-  msg["data"] = data;
+  Json::Value json;
+  json["method"] = method;
+  json["data"] = std::move(data);
 
-  pack_and_write(sock, Json::writeString(writer_builder, msg));
+  pack_and_write(sock, Json::writeString(writer_builder, json));
   auto res = receive(sock);
   root_event_handler(method, res);
   return res;
 }
 
 auto IPC::start() -> void {
+  spdlog::info("Wayfire IPC: starting");
+
+  // init state
+  send("window-rules/list-outputs", {});
+  send("window-rules/list-wsets", {});
+  send("window-rules/list-views", {});
+  send("window-rules/get-focused-output", {});
+
   std::thread([&] {
-    spdlog::info("Wayfire IPC: starting");
+    auto sock = connect();
 
-    int sock;
-    try {
-      sock = connect();
-    } catch (std::exception& e) {
-      spdlog::error(e.what());
-      return;
+    {
+      Json::Value json;
+      json["method"] = "window-rules/events/watch";
+
+      pack_and_write(sock, Json::writeString(writer_builder, json));
+      if (receive(sock)["result"] != "ok") {
+        spdlog::error(
+            "Wayfire IPC: method \"window-rules/events/watch\""
+            " have failed");
+        return;
+      }
     }
 
-    if (auto res = send("window-rules/events/watch", {}); res["result"] != "ok") {
-      spdlog::error(
-          "Wayfire IPC: method \"window-rules/events/watch\""
-          " have failed");
-      return;
-    }
-
-    // init state
-    send("window-rules/list-outputs", {});
-    send("window-rules/list-wsets", {});
-    send("window-rules/list-views", {});
-    send("window-rules/get-focused-output", {});
-
-    while (auto msg = receive(sock)) {
-      auto ev = msg["event"].asString();
+    while (auto json = receive(sock)) {
+      auto ev = json["event"].asString();
       spdlog::debug("Wayfire IPC: received event \"{}\"", ev);
-      root_event_handler(ev, msg);
+      root_event_handler(ev, json);
     }
   }).detach();
 }
 
-auto IPC::register_handler(const std::string& event, EventHandler& handler) -> void {
+auto IPC::register_handler(const std::string& event, const EventHandler& handler) -> void {
   auto _ = std::lock_guard{handlers_mutex};
-  handlers.emplace_back(event, &handler);
+  handlers.emplace_back(event, handler);
 }
 
 auto IPC::unregister_handler(EventHandler& handler) -> void {
   auto _ = std::lock_guard{handlers_mutex};
-  handlers.remove_if([&](auto& e) { return e.second == &handler; });
+  handlers.remove_if([&](auto& e) { return &e.second.get() == &handler; });
 }
 
 auto IPC::root_event_handler(const std::string& event, const Json::Value& data) -> void {
@@ -194,7 +205,7 @@ auto IPC::root_event_handler(const std::string& event, const Json::Value& data) 
   if (not(state.wsets_expired or state.views_expired)) {
     auto _ = std::lock_guard{handlers_mutex};
     for (const auto& [_event, handler] : handlers)
-      if (_event == event) (*handler)(event);
+      if (_event == event) handler(event);
   }
 }
 
@@ -205,11 +216,11 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     [x] view-mapped
     [x] view-unmapped
     [ ] view-set-output  // -> view-wset-changed
-    [ ] view-geometry-changed // can detect view movement when vwidth/vheight resizing
+    [ ] view-geometry-changed  // -> view-workspace-changed
     [x] view-wset-changed
-    [ ] view-focused  // -> output-gain-focus
-    [ ] view-title-changed
-    [ ] view-app-id-changed
+    [x] view-focused
+    [x] view-title-changed
+    [x] view-app-id-changed
     [ ] plugin-activation-state-changed
     [x] output-gain-focus
 
@@ -225,11 +236,14 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-mapped") {
     // data: { event, view }
     if (const auto& view_data = data["view"]; is_mapped_toplevel_view(view_data)) {
-      auto& wset = state.wsets[view_data["wset-index"].asUInt()];
-      auto& ws = wset.locate_ws(view_data["geometry"]);
-
-      ws.num_views++;
-      if (view_data["sticky"].asBool()) ws.num_sticky_views++;
+      try {
+        // view_data["wset-index"] could be messed up, but that's noise
+        auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
+        auto& ws = wset.locate_ws(view_data["geometry"]);
+        ws.num_views++;
+        if (view_data["sticky"].asBool()) ws.num_sticky_views++;
+      } catch (const std::out_of_range&) {
+      }
     }
     return;
   }
@@ -237,11 +251,17 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-unmapped") {
     // data: { event, view }
     if (const auto& view_data = data["view"]; is_mapped_toplevel_view(view_data)) {
-      auto& wset = state.wsets[view_data["wset-index"].asUInt()];
+      auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
       auto& ws = wset.locate_ws(view_data["geometry"]);
-
       ws.num_views--;
       if (view_data["sticky"].asBool()) ws.num_sticky_views--;
+
+      auto view_id = view_data["id"].asUInt();
+      for (auto& [_, wset] : state.wsets)
+        if (wset.focused_view_id == view_id) {
+          state.views_partial.erase(view_id);
+          wset.focused_view_id = {};
+        }
     }
     return;
   }
@@ -249,9 +269,9 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-wset-changed") {
     // data: { event, old-wset: wset, new-wset: wset, view }
     const auto& old_wset_data = data["old-wset"];
-    const auto& new_wset_data = data["new_wset"];
-    auto& old_wset = state.wsets[old_wset_data["index"].asUInt()];
-    auto& new_wset = state.wsets[new_wset_data["index"].asUInt()];
+    const auto& new_wset_data = data["new-wset"];
+    auto& old_wset = state.wsets.at(old_wset_data["index"].asUInt());
+    auto& new_wset = state.wsets.at(new_wset_data["index"].asUInt());
     auto& old_ws = old_wset.count_ws(old_wset_data["workspace"]);
     auto& new_ws = new_wset.count_ws(new_wset_data["workspace"]);
 
@@ -267,10 +287,24 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     return;
   }
 
+  if (event == "view-focused") {
+    // data: { event, view }
+    auto& wset = state.wsets.at(data["view"]["wset-index"].asUInt());
+    auto view_id = data["view"]["id"].asUInt();
+    state.views_partial.emplace(view_id, data["view"]);
+    wset.focused_view_id = view_id;
+    return;
+  }
+
+  if (event == "view-title-changed" || event == "view-app-id-changed") {
+    // data: { event, view }
+    state.views_partial.emplace(data["view"]["id"].asUInt(), data["view"]);
+    return;
+  }
+
   if (event == "output-gain-focus") {
     // data: { event, output }
     const auto& output_data = data["output"];
-
     state.focused_output_name = output_data["name"].asString();
 
     state.update_output(output_data);
@@ -280,9 +314,8 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-sticky") {
     // data: { event, view }
     const auto& view_data = data["view"];
-    auto& wset = state.wsets[view_data["wset-index"].asUInt()];
+    auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
     auto& ws = wset.locate_ws(view_data["geometry"]);
-
     if (view_data["sticky"].asBool())
       ws.num_sticky_views++;
     else
@@ -293,20 +326,18 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-workspace-changed") {
     // data: { event, from: point, to: point, view }
     const auto& view_data = data["view"];
-    auto& wset = state.wsets[view_data["wset-index"].asUInt()];
-
+    auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
     try {
       // data["from"] could be messed up, but that's noise
       auto& old_ws = wset.count_ws(data["from"]);
       auto& new_ws = wset.count_ws(data["to"]);
-
       old_ws.num_views--;
       new_ws.num_views++;
       if (view_data["sticky"].asBool()) {
         old_ws.num_sticky_views--;
         new_ws.num_sticky_views++;
       }
-    } catch (std::exception&) {
+    } catch (const std::out_of_range&) {
     }
     return;
   }
@@ -315,10 +346,10 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     // data: { event, new-wset: id, output: id, new-wset-data: wset, output-data: output }
     const auto& wset_data = data["new-wset-data"];
     const auto& output_data = data["output-data"];
-    auto& output = state.outputs[output_data["name"].asString()];
+    auto& output = state.outputs.at(output_data["name"].asString());
     auto wset_idx = wset_data["index"].asUInt();
 
-    state.wsets[wset_idx].output = &output;
+    state.wsets.at(wset_idx).output = output;
     output.wset_idx = wset_idx;
 
     state.update_wset(wset_data);
@@ -330,13 +361,13 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     // data: { event, previous-workspace: point, new-workspace: point,
     //         output: id, wset: id, output-data: output, wset-data: wset }
     const auto& wset_data = data["wset-data"];
-    auto& wset = state.wsets[wset_data["index"].asUInt()];
+    auto& wset = state.wsets.at(wset_data["index"].asUInt());
     auto x = data["new-workspace"]["x"].asUInt();
     auto y = data["new-workspace"]["y"].asUInt();
 
     wset.ws_idx = wset.ws_w * y + x;
 
-    state.update_output(data["output"]);
+    state.update_output(data["output-data"]);
     state.update_wset(wset_data);
     return;
   }
@@ -348,11 +379,14 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     // data: [ view ]
     for (auto& [_, wset] : state.wsets) std::ranges::fill(wset.wss, State::Workspace{});
     for (const auto& view_data : data | std::views::filter(is_mapped_toplevel_view)) {
-      auto& wset = state.wsets[view_data["wset-index"].asUInt()];
-      auto& ws = wset.locate_ws(view_data["geometry"]);
-
-      ws.num_views++;
-      if (view_data["sticky"].asBool()) ws.num_sticky_views++;
+      try {
+        // view_data["geometry"] could be messed up, but that's noise
+        auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
+        auto& ws = wset.locate_ws(view_data["geometry"]);
+        ws.num_views++;
+        if (view_data["sticky"].asBool()) ws.num_sticky_views++;
+      } catch (const std::out_of_range&) {
+      }
     }
     return;
   }
@@ -379,10 +413,9 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
       const auto& ws_data = wset_data["workspace"];
       auto ws_w = ws_data["grid_width"].asUInt();
       auto ws_h = ws_data["grid_height"].asUInt();
-
       state.wsets.emplace(wset_data["index"].asUInt(),
                           State::Wset{
-                              .output = &state.outputs[wset_data["output-name"].asString()],
+                              .output = state.outputs.at(wset_data["output-name"].asString()),
                               .wss = std::vector<State::Workspace>(ws_w * ws_h),
                               .ws_w = ws_w,
                               .ws_h = ws_h,
@@ -392,10 +425,20 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     return;
   }
 
+  if (event == "window-rules/get-focused-view") {
+    // data: { ok, info: view }
+    if (const auto& view_data = data["info"]) {
+      auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
+      auto view_id = view_data["id"].asUInt();
+      state.views_partial.emplace(view_id, view_data);
+      wset.focused_view_id = view_id;
+    }
+    return;
+  }
+
   if (event == "window-rules/get-focused-output") {
     // data: { ok, info: output }
     const auto& output_data = data["info"];
-
     state.focused_output_name = output_data["name"].asString();
 
     state.update_output(output_data);

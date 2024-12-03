@@ -42,6 +42,7 @@
 #include "modules/niri/workspaces.hpp"
 #endif
 #ifdef HAVE_WAYFIRE
+#include "modules/wayfire/window.hpp"
 #include "modules/wayfire/workspaces.hpp"
 #endif
 #if defined(__FreeBSD__) || defined(__linux__)
@@ -226,6 +227,9 @@ waybar::AModule* waybar::Factory::makeModule(const std::string& name,
     }
 #endif
 #ifdef HAVE_WAYFIRE
+    if (ref == "wayfire/window") {
+      return new waybar::modules::wayfire::Window(id, bar_, config_[name]);
+    }
     if (ref == "wayfire/workspaces") {
       return new waybar::modules::wayfire::Workspaces(id, bar_, config_[name]);
     }
