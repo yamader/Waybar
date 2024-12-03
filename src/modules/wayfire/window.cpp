@@ -25,11 +25,11 @@ Window::Window(const std::string& id, const Bar& bar, const Json::Value& config)
 Window::~Window() { ipc->unregister_handler(handler); }
 
 auto Window::update() -> void {
-  update_label();
+  update_icon_label();
   AAppIconLabel::update();
 }
 
-auto Window::update_label() -> void {
+auto Window::update_icon_label() -> void {
   auto _ = ipc->lock_state();
 
   const auto& output = ipc->get_outputs().at(bar_.output->name);
@@ -39,13 +39,13 @@ auto Window::update_label() -> void {
 
   if (wset.focused_view_id > 0 && views.contains(wset.focused_view_id)) {
     const auto& view = views.at(wset.focused_view_id);
-
-    auto title = waybar::util::sanitize_string(view["title"].asString());
-    auto app_id = waybar::util::sanitize_string(view["app-id"].asString());
+    auto title = view["title"].asString();
+    auto app_id = view["app-id"].asString();
 
     // update label
     label_.set_markup(waybar::util::rewriteString(
-        fmt::format(fmt::runtime(format_), fmt::arg("title", title), fmt::arg("app_id", app_id)),
+        fmt::format(fmt::runtime(format_), fmt::arg("title", waybar::util::sanitize_string(title)),
+                    fmt::arg("app_id", waybar::util::sanitize_string(app_id))),
         config_["rewrite"]));
 
     // update window#waybar.solo
@@ -60,9 +60,13 @@ auto Window::update_label() -> void {
 
     // update window#waybar.empty
     ctx->remove_class("empty");
+
+    updateAppIconName(app_id, "");
     label_.show();
   } else {
     ctx->add_class("empty");
+
+    updateAppIconName("", "");
     label_.hide();
   }
 }

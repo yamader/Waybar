@@ -18,7 +18,7 @@ class Window : public AAppIconLabel {
   ~Window() override;
 
   auto update() -> void override;
-  auto update_label() -> void;
+  auto update_icon_label() -> void;
 };
 
 }  // namespace waybar::modules::wayfire

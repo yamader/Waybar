@@ -9,9 +9,12 @@
 #include <bit>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <ranges>
-#include <stdexcept>
 #include <thread>
+
+// todo: maybe_empty_
+// todo: add idx for wset
 
 namespace waybar::modules::wayfire {
 
@@ -55,13 +58,13 @@ auto State::Wset::count_ws(const Json::Value& pos) const -> const Workspace& {
 }
 
 auto State::Wset::locate_ws(const Json::Value& geo) -> Workspace& {
-  auto x = geo["x"].asInt() / output.get().w;
-  auto y = geo["y"].asInt() / output.get().h;
+  auto x = std::max(geo["x"].asInt(), 0) / output.get().w;
+  auto y = std::max(geo["y"].asInt(), 0) / output.get().h;
   return wss.at(ws_w * y + x);
 }
 auto State::Wset::locate_ws(const Json::Value& geo) const -> const Workspace& {
-  auto x = geo["x"].asInt() / output.get().w;
-  auto y = geo["y"].asInt() / output.get().h;
+  auto x = std::max(geo["x"].asInt(), 0) / output.get().w;
+  auto y = std::max(geo["y"].asInt(), 0) / output.get().h;
   return wss.at(ws_w * y + x);
 }
 
@@ -237,12 +240,13 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     // data: { event, view }
     if (const auto& view_data = data["view"]; is_mapped_toplevel_view(view_data)) {
       try {
-        // view_data["wset-index"] could be messed up, but that's noise
+        // view_data["wset-index"] could be messed up
         auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
         auto& ws = wset.locate_ws(view_data["geometry"]);
         ws.num_views++;
         if (view_data["sticky"].asBool()) ws.num_sticky_views++;
-      } catch (const std::out_of_range&) {
+        state.views.insert_or_assign(view_data["id"].asUInt(), view_data);
+      } catch (const std::exception&) {
       }
     }
     return;
@@ -255,13 +259,9 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
       auto& ws = wset.locate_ws(view_data["geometry"]);
       ws.num_views--;
       if (view_data["sticky"].asBool()) ws.num_sticky_views--;
-
-      auto view_id = view_data["id"].asUInt();
-      for (auto& [_, wset] : state.wsets)
-        if (wset.focused_view_id == view_id) {
-          state.views_partial.erase(view_id);
-          wset.focused_view_id = {};
-        }
+      state.views.erase(view_data["id"].asUInt());
+      wset.focused_view_id = {};
+      // todo:
     }
     return;
   }
@@ -281,6 +281,7 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
       old_ws.num_sticky_views--;
       new_ws.num_sticky_views++;
     }
+    old_wset.focused_view_id = {};
 
     state.update_wset(old_wset_data);
     state.update_wset(new_wset_data);
@@ -289,16 +290,24 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
 
   if (event == "view-focused") {
     // data: { event, view }
-    auto& wset = state.wsets.at(data["view"]["wset-index"].asUInt());
-    auto view_id = data["view"]["id"].asUInt();
-    state.views_partial.emplace(view_id, data["view"]);
-    wset.focused_view_id = view_id;
+    if (const auto& view_data = data["view"]) {
+      try {
+        // view_data["wset-index"] could be messed up
+        auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
+        auto view_id = data["view"]["id"].asUInt();
+        state.views.insert_or_assign(view_id, data["view"]);
+        wset.focused_view_id = view_id;
+      } catch (const std::exception&) {
+      }
+    } else {
+      state.wsets.at(state.maybe_empty_focus_wset_idx).focused_view_id = {};
+    }
     return;
   }
 
   if (event == "view-title-changed" || event == "view-app-id-changed") {
     // data: { event, view }
-    state.views_partial.emplace(data["view"]["id"].asUInt(), data["view"]);
+    state.views.insert_or_assign(data["view"]["id"].asUInt(), data["view"]);
     return;
   }
 
@@ -326,9 +335,10 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
   if (event == "view-workspace-changed") {
     // data: { event, from: point, to: point, view }
     const auto& view_data = data["view"];
-    auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
+    auto wset_idx = view_data["wset-index"].asUInt();
+    auto& wset = state.wsets.at(wset_idx);
     try {
-      // data["from"] could be messed up, but that's noise
+      // data["from"] could be messed up
       auto& old_ws = wset.count_ws(data["from"]);
       auto& new_ws = wset.count_ws(data["to"]);
       old_ws.num_views--;
@@ -337,7 +347,8 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
         old_ws.num_sticky_views--;
         new_ws.num_sticky_views++;
       }
-    } catch (const std::out_of_range&) {
+      wset.focused_view_id = {};
+    } catch (const std::exception&) {
     }
     return;
   }
@@ -366,6 +377,7 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     auto y = data["new-workspace"]["y"].asUInt();
 
     wset.ws_idx = wset.ws_w * y + x;
+    wset.focused_view_id = {};
 
     state.update_output(data["output-data"]);
     state.update_wset(wset_data);
@@ -380,12 +392,12 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     for (auto& [_, wset] : state.wsets) std::ranges::fill(wset.wss, State::Workspace{});
     for (const auto& view_data : data | std::views::filter(is_mapped_toplevel_view)) {
       try {
-        // view_data["geometry"] could be messed up, but that's noise
+        // view_data["geometry"] could be messed up
         auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
         auto& ws = wset.locate_ws(view_data["geometry"]);
         ws.num_views++;
         if (view_data["sticky"].asBool()) ws.num_sticky_views++;
-      } catch (const std::out_of_range&) {
+      } catch (const std::exception&) {
       }
     }
     return;
@@ -430,7 +442,7 @@ auto IPC::update_state_handler(const std::string& event, const Json::Value& data
     if (const auto& view_data = data["info"]) {
       auto& wset = state.wsets.at(view_data["wset-index"].asUInt());
       auto view_id = view_data["id"].asUInt();
-      state.views_partial.emplace(view_id, view_data);
+      state.views.insert_or_assign(view_id, view_data);
       wset.focused_view_id = view_id;
     }
     return;

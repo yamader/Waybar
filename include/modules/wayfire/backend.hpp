@@ -48,6 +48,7 @@ struct State {
   };
 
   struct Wset {
+    size_t idx;
     std::reference_wrapper<Output> output;
     std::vector<Workspace> wss;
     size_t ws_w, ws_h, ws_idx;
@@ -61,10 +62,11 @@ struct State {
 
   std::unordered_map<std::string, Output> outputs;
   std::unordered_map<size_t, Wset> wsets;
-  std::unordered_map<size_t, Json::Value> views_partial;
+  std::unordered_map<size_t, Json::Value> views;
   std::string focused_output_name;
+  size_t maybe_empty_focus_wset_idx; // wtf IPC events order
 
-  // needed ????
+  // todo: really needed ????
   // to support workspace resize
   std::atomic_bool wsets_expired, views_expired;
 
@@ -117,7 +119,7 @@ class IPC {
   auto lock_state() -> std::lock_guard<std::mutex> { return std::lock_guard{state_mutex}; }
   auto& get_outputs() const { return state.outputs; }
   auto& get_wsets() const { return state.wsets; }
-  auto& get_views_partial() const { return state.views_partial; }
+  auto& get_views_partial() const { return state.views; }
   auto& get_focused_output_name() const { return state.focused_output_name; }
 };
 
